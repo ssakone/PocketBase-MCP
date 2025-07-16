@@ -1,0 +1,117 @@
+name: Release and Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version type (prerelease, prepatch, patch, preminor, minor, premajor, major)'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - prerelease
+          - prepatch
+          - patch
+          - preminor
+          - minor
+          - premajor
+          - major
+      custom_version:
+        description: 'Custom version (leave empty to use version_type)'
+        required: false
+        type: string
+      dist_tag:
+        description: 'npm distribution tag (latest, next, beta, etc)'
+        required: false
+        default: 'latest'
+        type: string
+
+jobs:
+  release-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_GITHUB }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Configure Git
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git config pull.rebase false
+
+      - name: Bump version
+        id: bump_version
+        run: |
+          if [ -n "${{ github.event.inputs.custom_version }}" ]; then
+            echo "Using custom version ${{ github.event.inputs.custom_version }}"
+            npm version ${{ github.event.inputs.custom_version }} --no-git-tag-version
+            echo "VERSION=${{ github.event.inputs.custom_version }}" >> $GITHUB_ENV
+          else
+            echo "Bumping ${{ github.event.inputs.version_type }} version"
+            NEW_VERSION=$(npm version ${{ github.event.inputs.version_type }} --no-git-tag-version)
+            echo "VERSION=${NEW_VERSION:1}" >> $GITHUB_ENV
+          fi
+          echo "New version: ${{ env.VERSION }}"
+
+      - name: Generate Changelog
+        run: |
+          # Generate the full changelog
+          npm run changelog
+          # Generate release notes for just this version
+          npm run changelog:latest
+
+      - name: Build project
+        run: bun run build && bun run build:http
+
+      - name: Commit and push changes
+        run: |
+          git pull origin main --no-edit
+          git add package.json CHANGELOG.md
+          git commit -m "Bump version to v${{ env.VERSION }}"
+          git push --force-with-lease
+
+      - name: Create and push tag
+        run: |
+          # Delete the tag if it already exists locally
+          git tag -d "v${{ env.VERSION }}" 2>/dev/null || true
+          # Delete the tag if it exists on the remote
+          git push origin --delete "v${{ env.VERSION }}" 2>/dev/null || true
+          # Create and push the new tag
+          git tag -a "v${{ env.VERSION }}" -m "Release v${{ env.VERSION }}"
+          git push origin "v${{ env.VERSION }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: Release v${{ env.VERSION }}
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_GITHUB }}
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance --tag ${{ github.event.inputs.dist_tag || 'latest' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }} 
